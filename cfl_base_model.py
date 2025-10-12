@@ -72,6 +72,23 @@ def load_dataset(path: str, target: Optional[str] = None, id_col: Optional[str] 
 def ni_from_confusion(conf: np.ndarray, m: int = 2) -> float:
     """
     혼동 행렬로부터 Normalized Mutual Information (NI) 점수를 계산
+    
+    Computes NI = I(C;K) / H(C) where:
+    - C is the true class (rows of confusion matrix)
+    - K is the predicted class or reject state (columns of confusion matrix)
+    
+    Parameters:
+        conf: Confusion matrix of shape (m, m) or (m, m+1)
+              - (m, m): Standard confusion matrix without reject option
+              - (m, m+1): With reject option, where column m is the reject state
+        m: Number of classes (default 2 for binary classification)
+    
+    Returns:
+        Normalized Information score in [0, 1]
+        
+    Note: When reject option is present (cols = m+1), the reject column is included
+          in the mutual information calculation, ensuring p(K=j) sums to 1 over all
+          predicted states (including reject), consistent with arXiv:1307.5730.
     """
     conf = conf.astype(float)
     if conf.ndim != 2: raise ValueError("conf must be 2D")
@@ -80,27 +97,38 @@ def ni_from_confusion(conf: np.ndarray, m: int = 2) -> float:
     if cols not in (m, m + 1): raise ValueError("conf cols must be m or m+1")
     n = conf.sum()
     if n <= 0: return 0.0
-    Ci = conf.sum(axis=1)
-    col_sums = conf[:, :m].sum(axis=0)
+    
+    eps = 1e-10  # Small constant for numerical stability to avoid log(0)
+    Ci = conf.sum(axis=1)  # Row sums: p(C=i) denominator
+    
+    # Include reject column in col_sums if present (cols == m+1)
+    # This ensures p(K=j) is computed over all predicted states and sums to 1
+    col_sums = conf.sum(axis=0)  # Sum over all columns (m or m+1)
+    
     if np.any(Ci == 0): return 0.0
 
+    # Compute MI numerator: sum over all columns including reject if present
+    # I(C;K) = sum_i sum_j n_ij * log2(p(C=i,K=j) / (p(C=i) * p(K=j)))
     num = 0.0
     for i in range(m):
-        for j in range(m):
-            if col_sums[j] <= 0: continue
+        for j in range(cols):  # Loop over all columns (m or m+1 if reject present)
             cij = conf[i, j]
-            if cij <= 0: continue
-            pij_given_i = cij / Ci[i]
-            pj = col_sums[j] / n
+            if cij <= eps: continue
+            if col_sums[j] <= eps: continue
+            
+            pij_given_i = cij / Ci[i]  # p(K=j | C=i)
+            pj = col_sums[j] / n       # p(K=j) - now includes reject if present
             num += cij * math.log2(pij_given_i / pj)
 
+    # Compute denominator: -n * H(C) = -sum_i Ci * log2(Ci/n)
+    # Entropy over true classes (rows)
     den = 0.0
     for i in range(m):
+        if Ci[i] <= eps: continue
         pi = Ci[i] / n
-        if pi <= 0: continue
         den += Ci[i] * math.log2(pi)
 
-    if den == 0: return 0.0
+    if abs(den) < eps: return 0.0
     NI = -num / den
     return float(max(0.0, min(1.0, NI)))
 
